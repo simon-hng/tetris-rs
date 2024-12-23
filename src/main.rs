@@ -1,24 +1,137 @@
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
-    widgets::{Block, Borders, Paragraph},
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Style},
+    widgets::{
+        canvas::{Canvas, Rectangle},
+        Block, Borders, Paragraph,
+    },
     Frame,
 };
 use std::time::{Duration, Instant};
 
 const BOARD_WIDTH: usize = 10;
 const BOARD_HEIGHT: usize = 20;
+const CELL_CHARS: &str = "    "; // Four spaces for a wider block
 const TICK_RATE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Cell {
     Empty,
-    Filled,
+    Filled(Color),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum TetrominoType {
+    I,
+    O,
+    T,
+    L,
+    J,
+    S,
+    Z,
+}
+
+impl TetrominoType {
+    fn color(&self) -> Color {
+        match self {
+            TetrominoType::I => Color::Cyan,
+            TetrominoType::O => Color::Yellow,
+            TetrominoType::T => Color::Magenta,
+            TetrominoType::L => Color::White,
+            TetrominoType::J => Color::Blue,
+            TetrominoType::S => Color::Green,
+            TetrominoType::Z => Color::Red,
+        }
+    }
+
+    fn shape(&self) -> Vec<Vec<bool>> {
+        match self {
+            TetrominoType::I => vec![
+                vec![true, true, true, true],
+                vec![false, false, false, false],
+                vec![false, false, false, false],
+                vec![false, false, false, false],
+            ],
+            TetrominoType::O => vec![vec![true, true], vec![true, true]],
+            TetrominoType::T => vec![
+                vec![false, true, false],
+                vec![true, true, true],
+                vec![false, false, false],
+            ],
+            TetrominoType::L => vec![
+                vec![false, false, true],
+                vec![true, true, true],
+                vec![false, false, false],
+            ],
+            TetrominoType::J => vec![
+                vec![true, false, false],
+                vec![true, true, true],
+                vec![false, false, false],
+            ],
+            TetrominoType::S => vec![
+                vec![false, true, true],
+                vec![true, true, false],
+                vec![false, false, false],
+            ],
+            TetrominoType::Z => vec![
+                vec![true, true, false],
+                vec![false, true, true],
+                vec![false, false, false],
+            ],
+        }
+    }
 }
 
 struct Tetromino {
+    piece_type: TetrominoType,
     shape: Vec<Vec<bool>>,
     x: i32,
     y: i32,
+}
+
+impl Tetromino {
+    fn new_random() -> Self {
+        use rand::seq::SliceRandom;
+
+        let piece_types = [
+            TetrominoType::I,
+            TetrominoType::O,
+            TetrominoType::T,
+            TetrominoType::L,
+            TetrominoType::J,
+            TetrominoType::S,
+            TetrominoType::Z,
+        ];
+
+        let piece_type = *piece_types.choose(&mut rand::thread_rng()).unwrap();
+        let shape = piece_type.shape();
+        let width = shape[0].len() as i32;
+
+        Tetromino {
+            piece_type,
+            shape,
+            x: (BOARD_WIDTH as i32 - width) / 2,
+            y: 0,
+        }
+    }
+
+    fn rotate_clockwise(&self) -> Vec<Vec<bool>> {
+        let n = self.shape.len();
+        let mut rotated = vec![vec![false; n]; n];
+
+        for i in 0..n {
+            for j in 0..n {
+                rotated[j][n - 1 - i] = self.shape[i][j];
+            }
+        }
+
+        rotated
+    }
+
+    fn color(&self) -> Color {
+        self.piece_type.color()
+    }
 }
 
 struct Game {
@@ -26,6 +139,7 @@ struct Game {
     current_piece: Tetromino,
     last_tick: Instant,
     game_over: bool,
+    score: u32,
 }
 
 impl Game {
@@ -62,12 +176,14 @@ impl Game {
 
         // If all attempts fail, the rotation is not performed
     }
+
     fn new() -> Self {
         Game {
             board: vec![vec![Cell::Empty; BOARD_WIDTH]; BOARD_HEIGHT],
             current_piece: Tetromino::new_random(),
             last_tick: Instant::now(),
             game_over: false,
+            score: 0,
         }
     }
 
@@ -78,7 +194,10 @@ impl Game {
         let mut y = BOARD_HEIGHT - 1;
         while y > 0 {
             // Check if current line is full
-            if self.board[y].iter().all(|&cell| cell == Cell::Filled) {
+            if self.board[y]
+                .iter()
+                .all(|cell| matches!(cell, Cell::Filled(_)))
+            {
                 // Move all lines above down by one
                 for row in (1..=y).rev() {
                     self.board[row] = self.board[row - 1].clone();
@@ -91,12 +210,13 @@ impl Game {
             }
         }
 
-        // Here you could add scoring based on lines_cleared
-        // Traditional scoring is:
-        // 1 line = 100 points
-        // 2 lines = 300 points
-        // 3 lines = 500 points
-        // 4 lines = 800 points (Tetris!)
+        match lines_cleared {
+            1 => self.score += 100,
+            2 => self.score += 300,
+            3 => self.score += 500,
+            4 => self.score += 800,
+            _ => (),
+        }
     }
 
     fn tick(&mut self) {
@@ -124,6 +244,7 @@ impl Game {
         }
     }
 
+    // Update is_valid_position to check for Cell::Empty
     fn is_valid_position(&self, shape: &Vec<Vec<bool>>, x: i32, y: i32) -> bool {
         for (row_idx, row) in shape.iter().enumerate() {
             for (col_idx, &is_filled) in row.iter().enumerate() {
@@ -138,10 +259,11 @@ impl Game {
                         return false;
                     }
 
-                    if board_y >= 0
-                        && self.board[board_y as usize][board_x as usize] == Cell::Filled
-                    {
-                        return false;
+                    if board_y >= 0 {
+                        match self.board[board_y as usize][board_x as usize] {
+                            Cell::Empty => {}
+                            Cell::Filled(_) => return false,
+                        }
                     }
                 }
             }
@@ -150,13 +272,14 @@ impl Game {
     }
 
     fn freeze_piece(&mut self) {
+        let color = self.current_piece.color();
         for (row_idx, row) in self.current_piece.shape.iter().enumerate() {
             for (col_idx, &is_filled) in row.iter().enumerate() {
                 if is_filled {
                     let board_x = self.current_piece.x + col_idx as i32;
                     let board_y = self.current_piece.y + row_idx as i32;
                     if board_y >= 0 && board_y < BOARD_HEIGHT as i32 {
-                        self.board[board_y as usize][board_x as usize] = Cell::Filled;
+                        self.board[board_y as usize][board_x as usize] = Cell::Filled(color);
                     }
                 }
             }
@@ -174,77 +297,6 @@ impl Game {
         ) {
             self.game_over = true;
         }
-    }
-}
-
-impl Tetromino {
-    fn new_random() -> Self {
-        use rand::seq::SliceRandom;
-
-        // All 7 standard tetromino shapes
-        let shapes = vec![
-            // I piece
-            vec![
-                vec![true, true, true, true],
-                vec![false, false, false, false],
-                vec![false, false, false, false],
-                vec![false, false, false, false],
-            ],
-            // O piece
-            vec![vec![true, true], vec![true, true]],
-            // T piece
-            vec![
-                vec![false, true, false],
-                vec![true, true, true],
-                vec![false, false, false],
-            ],
-            // L piece
-            vec![
-                vec![false, false, true],
-                vec![true, true, true],
-                vec![false, false, false],
-            ],
-            // J piece
-            vec![
-                vec![true, false, false],
-                vec![true, true, true],
-                vec![false, false, false],
-            ],
-            // S piece
-            vec![
-                vec![false, true, true],
-                vec![true, true, false],
-                vec![false, false, false],
-            ],
-            // Z piece
-            vec![
-                vec![true, true, false],
-                vec![false, true, true],
-                vec![false, false, false],
-            ],
-        ];
-
-        let shape = shapes.choose(&mut rand::thread_rng()).unwrap().clone();
-        let width = shape[0].len() as i32;
-
-        Tetromino {
-            shape,
-            x: (BOARD_WIDTH as i32 - width) / 2,
-            y: 0,
-        }
-    }
-
-    fn rotate_clockwise(&self) -> Vec<Vec<bool>> {
-        let n = self.shape.len();
-        let mut rotated = vec![vec![false; n]; n];
-
-        for i in 0..n {
-            for j in 0..n {
-                rotated[j][n - 1 - i] = self.shape[i][j];
-            }
-        }
-
-        rotated
     }
 }
 
@@ -287,10 +339,21 @@ fn main() {
 }
 
 fn draw(frame: &mut Frame, game: &Game) {
-    // Create a temporary board that includes both frozen pieces and current piece
+    // Create the main layout
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .split(frame.area());
+
+    draw_game_board(frame, game, chunks[0]);
+    draw_side_panel(frame, game, chunks[1]);
+}
+
+fn draw_game_board(frame: &mut Frame, game: &Game, area: Rect) {
+    // Create a temporary board with current piece
     let mut display_board = game.board.clone();
 
-    // Draw current piece onto the temporary board
+    // Add current piece to display board
     for (row_idx, row) in game.current_piece.shape.iter().enumerate() {
         for (col_idx, &is_filled) in row.iter().enumerate() {
             if is_filled {
@@ -301,28 +364,95 @@ fn draw(frame: &mut Frame, game: &Game) {
                     && board_x >= 0
                     && board_x < BOARD_WIDTH as i32
                 {
-                    display_board[board_y as usize][board_x as usize] = Cell::Filled;
+                    display_board[board_y as usize][board_x as usize] =
+                        Cell::Filled(game.current_piece.color());
                 }
             }
         }
     }
 
-    // Convert the board to a displayable string
-    let board_display: String = display_board
-        .iter()
-        .map(|row| {
-            row.iter()
-                .map(|&cell| match cell {
-                    Cell::Empty => '.',
-                    Cell::Filled => '#',
-                })
-                .collect::<String>()
-                + "\n"
-        })
-        .collect();
+    // Scale vertically by repeating each row
+    let vertical_scale = 2; // Each cell is 2 rows high
+    let mut scaled_rows = Vec::with_capacity(BOARD_HEIGHT * vertical_scale);
 
-    let paragraph =
-        Paragraph::new(board_display).block(Block::default().borders(Borders::ALL).title("Tetris"));
+    for y in 0..BOARD_HEIGHT {
+        let row_spans: Vec<ratatui::text::Span> = display_board[y]
+            .iter()
+            .map(|cell| match cell {
+                Cell::Empty => {
+                    ratatui::text::Span::styled(CELL_CHARS, Style::default().bg(Color::Gray))
+                }
+                Cell::Filled(color) => {
+                    ratatui::text::Span::styled(CELL_CHARS, Style::default().bg(*color))
+                }
+            })
+            .collect();
 
-    frame.render_widget(paragraph, frame.size());
+        let line = ratatui::text::Line::from(row_spans);
+        // Add each row multiple times for vertical scaling
+        for _ in 0..vertical_scale {
+            scaled_rows.push(line.clone());
+        }
+    }
+
+    let board_widget = Paragraph::new(scaled_rows).block(Block::default().title("Tetris"));
+
+    // Calculate the maximum space we can use while maintaining aspect ratio
+    let available_height = area.height as usize - 2; // -2 for borders
+    let available_width = (area.width as usize - 2) / CELL_CHARS.len(); // Account for cell width
+
+    let height_ratio = available_height as f32 / (BOARD_HEIGHT * vertical_scale) as f32;
+    let width_ratio = available_width as f32 / BOARD_WIDTH as f32;
+
+    // Use the smaller ratio to maintain aspect ratio
+    let ratio = height_ratio.min(width_ratio);
+
+    let used_height = (BOARD_HEIGHT * vertical_scale) as f32 * ratio;
+    let used_width = (BOARD_WIDTH * CELL_CHARS.len()) as f32 * ratio + 2.0; // +2 for borders
+
+    // Center the board in the available space
+    let vertical_padding = ((area.height as f32 - used_height) / 2.0).floor() as u16;
+    let horizontal_padding = ((area.width as f32 - used_width) / 2.0).floor() as u16;
+
+    let centered_area = Rect {
+        x: area.x + horizontal_padding,
+        y: area.y + vertical_padding,
+        width: used_width as u16,
+        height: used_height as u16 + 2, // +2 for borders
+    };
+
+    frame.render_widget(board_widget, centered_area);
+}
+
+fn draw_side_panel(frame: &mut Frame, game: &Game, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Score
+            Constraint::Length(6), // Next piece
+            Constraint::Min(0),    // Controls
+        ])
+        .split(area);
+
+    // Score
+    let score_text = format!("Score: {}", game.score);
+    let score = Paragraph::new(score_text)
+        .block(Block::default().borders(Borders::ALL).title("Score"))
+        .style(Style::default().fg(Color::Yellow));
+    frame.render_widget(score, chunks[0]);
+
+    // Controls help
+    let controls = vec![
+        "Controls:",
+        "←/→: Move",
+        "↑: Rotate",
+        "↓: Soft Drop",
+        "Q: Quit",
+    ]
+    .join("\n");
+
+    let controls_widget = Paragraph::new(controls)
+        .block(Block::default().borders(Borders::ALL).title("Help"))
+        .style(Style::default().fg(Color::Gray));
+    frame.render_widget(controls_widget, chunks[2]);
 }
